@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 辩论赛</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- 引入 Marked.js 用于解析 Markdown, 虽然当前版本未使用, 但为未来扩展保留 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+<div id="app-container">
+    <h1>AI 辩论赛</h1>
+
+    <div id="config-panel">
+        <div class="input-group">
+            <label for="topic-input">辩论主题:</label>
+            <input type="text" id="topic-input" value="科技发展是否让人们变得更孤独">
+        </div>
+        <div class="input-group">
+            <label for="rounds-input">辩论轮次:</label>
+            <input type="number" id="rounds-input" value="3" min="1" max="5">
+        </div>
+        <button id="start-button">🚀 开始辩论</button>
+    </div>
+
+    <div id="debate-container">
+        <p id="status-indicator">点击开始按钮以启动辩论</p>
+        <!-- 可滚动的辩论内容外部容器 -->
+        <div id="debate-output-container">
+            <!-- 实际放置辩论消息的内部容器 -->
+            <div id="debate-output"></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- 确保引入的是 /static/script.js -->
+<script src="/static/script.js"></script>
+</body>
+</html>

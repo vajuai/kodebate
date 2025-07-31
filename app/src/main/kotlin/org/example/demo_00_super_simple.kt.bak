@@ -1,0 +1,148 @@
+package org.example
+
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.ext.agent.simpleSingleRunAgent
+import ai.koog.agents.ext.tool.SayToUser
+import ai.koog.agents.features.common.message.FeatureMessage
+import ai.koog.agents.features.common.message.FeatureMessageProcessor
+import ai.koog.agents.features.tracing.feature.Tracing
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+import kotlinx.coroutines.runBlocking
+
+fun main() = runBlocking {
+    val apiKey = System.getenv("OPENAI_API_KEY")
+
+    val toolRegistry = ToolRegistry {
+        tools(
+            listOf(SayToUser)
+        )
+    }
+
+    val agent = AIAgent(
+        executor = simpleOpenAIExecutor(apiKey),
+        systemPrompt = """
+            You are a helpful assistant that can answer general questions.            
+            Answer any user query and provide a detailed response. 
+            Once you have the answer, tell it to the user
+        """.trimIndent(),
+        llmModel = OpenAIModels.Chat.GPT4o,
+        toolRegistry = toolRegistry,
+    )
+    agent.run("Tell me a friendly programmers' joke about Amsterdam?")
+}
+
+
+// 定义用于结构化响应的数据类
+@Serializable
+data class JokeSelection(
+    val index: Int,
+    val reason: String
+)
+
+val strategy = strategy("best-joke") {
+    // Define nodes for different LLM models
+    val nodeOpenAI by node<String, String> { topic ->
+        println("🤖 OpenAI GPT-4.1 正在生成笑话...")
+        llm.writeSession {
+            model = OpenAIModels.Chat.GPT4_1
+            updatePrompt {
+                system("You are a comedian. Generate a funny joke about the given topic.straight one output, no need to compare, pick and reasoning")
+                user("Tell me a joke about $topic.")
+            }
+            val response = requestLLMWithoutTools()
+            val joke = response.content
+            println("✅ OpenAI 完成: $joke")
+            joke
+        }
+    }
+
+    val nodeClaudeHaiku by node<String, String> { topic ->
+        println("🤖 Claude 3 Haiku 正在生成笑话...")
+        llm.writeSession {
+            model = OpenRouterModels.Claude3Haiku
+            updatePrompt {
+                system("You are a comedian. Generate a funny joke about the given topic.straight one output, no need to compare, pick and reasoning")
+                user("Tell me a joke about $topic.")
+            }
+            val response = requestLLMWithoutTools()
+            val joke = response.content
+            println("✅ Claude 完成: $joke")
+            joke
+        }
+    }
+
+    val nodeGeminiFlash by node<String, String> { topic ->
+        println("🤖 Gemini 2.0 Flash 正在生成笑话...")
+        llm.writeSession {
+            model = GoogleModels.Gemini2_0Flash
+            updatePrompt {
+                system("You are a comedian. Generate a funny joke about the given topic. straight one output, no need to compare, pick and reasoning")
+                user("Tell me a joke about $topic.")
+            }
+            val response = requestLLMWithoutTools()
+            val joke = response.content
+            println("✅ Gemini 完成: $joke")
+            joke
+        }
+    }
+
+    // Execute joke generation in parallel and select the best joke
+    val nodeGenerateBestJoke by parallel(
+        nodeOpenAI, nodeClaudeHaiku, nodeGeminiFlash,
+    ) {
+        selectByIndex { jokes ->
+            println("\n🎯 所有模型生成完成，正在选择最佳笑话...")
+            println("📋 生成的笑话:")
+            jokes.forEachIndexed { index, joke ->
+                println("   ${index + 1}. $joke")
+            }
+
+            // Another LLM (e.g., GPT4o) would find the funniest joke:
+            llm.writeSession {
+                model = OpenAIModels.Chat.GPT4o
+                updatePrompt {
+                    prompt("best-joke-selector") {
+                        system("You are a comedy critic. Select the best joke from the provided options.")
+                        user(
+                            """
+                            Here are three jokes about the same topic:
+
+                            ${jokes.mapIndexed { index, joke -> "Joke ${index + 1}:\n$joke" }.joinToString("\n\n")}
+
+                            Select the best joke by providing the index (1, 2, or 3) and explain why it's the best.
+                            Respond with a JSON object containing:
+                            - index: the 1-based index of the best joke (1, 2, or 3)
+                            - reason: explanation of why this joke is the best
+                            """.trimIndent()
+                        )
+                    }
+                }
+
+                val response = requestLLMStructured(JsonStructuredData.createJsonStructure<JokeSelection>())
+                val bestJoke = response.getOrNull()?.structure
+                val selectedIndex = (bestJoke?.index ?: 1) - 1
+
+                println("🏆 GPT-4o 选择了第 ${bestJoke?.index} 个笑话")
+                println("📝 理由: ${bestJoke?.reason}")
+                println("🎉 最终选择: ${jokes[selectedIndex]}")
+
+                // 转换为0-based索引
+                selectedIndex
+            }
+        }
+    }
+
+    // Connect the nodes
+    nodeStart then nodeGenerateBestJoke then nodeFinish
+}
+
+
+
+
+
+
+
+
+

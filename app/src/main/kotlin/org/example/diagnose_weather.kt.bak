@@ -1,0 +1,163 @@
+package org.example
+
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.features.common.message.FeatureMessage
+import ai.koog.agents.features.common.message.FeatureMessageProcessor
+import ai.koog.agents.features.tracing.feature.Tracing
+import ai.koog.agents.mcp.McpToolRegistryProvider
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+import kotlinx.coroutines.runBlocking
+import java.io.BufferedReader
+import java.io.InputStreamReader
+
+// 改进的天气 Agent 创建函数
+suspend fun createImprovedWeatherAgent(): AIAgent<String, String> {
+    val openAIApiToken = System.getenv("OPENAI_API_KEY") ?: error("OPENAI_API_KEY environment variable not set")
+    val owmApiKey = System.getenv("OWM_API_KEY") ?: error("OWM_API_KEY environment variable not set")
+
+    println("🌤️ [ImprovedWeatherAgent] 正在启动 OpenWeather MCP 服务...")
+    println("🔑 [ImprovedWeatherAgent] OWM_API_KEY: ${owmApiKey.take(10)}...")
+
+    // 验证 API 密钥
+    if (!validateApiKey(owmApiKey)) {
+        throw IllegalArgumentException("❌ OpenWeather API 密钥无效或无权限")
+    }
+
+    // 启动 Docker 容器
+    val process = startMcpContainer(owmApiKey)
+
+    // 等待更长时间确保服务完全启动
+    println("⏳ [ImprovedWeatherAgent] 等待 MCP 服务完全启动...")
+    Thread.sleep(5000)
+
+    try {
+        // 连接到 MCP 服务器
+        println("🔧 [ImprovedWeatherAgent] 正在连接到 MCP 服务器...")
+        val toolRegistry = McpToolRegistryProvider.fromTransport(
+            transport = McpToolRegistryProvider.defaultStdioTransport(process)
+        )
+
+        println("✅ [ImprovedWeatherAgent] 成功连接到 MCP 服务器")
+
+        return AIAgent(
+            executor = simpleOpenAIExecutor(openAIApiToken),
+            systemPrompt = """
+                You are a weather assistant that provides accurate weather information.
+                
+                IMPORTANT INSTRUCTIONS:
+                1. Always use the weather tool to get real-time weather data
+                2. If the weather tool fails with "unit unavailable" error, inform the user that the weather service is temporarily unavailable
+                3. Provide helpful suggestions for alternative weather sources
+                4. Be transparent about any technical issues
+                
+                When weather data is successfully retrieved:
+                - Format the information clearly and concisely
+                - Include temperature, weather conditions, humidity, and wind if available
+                - Use appropriate units (Celsius for temperature, km/h for wind speed)
+                
+                When weather service fails:
+                - Acknowledge the service issue
+                - Suggest checking weather.com, AccuWeather, or local weather apps
+                - Offer to help with other topics
+                
+                Always be helpful and provide accurate information only.
+            """.trimIndent(),
+            llmModel = OpenAIModels.Chat.GPT4o,
+            toolRegistry = toolRegistry
+        ) {
+            install(Tracing) {
+                addMessageProcessor(object : FeatureMessageProcessor() {
+                    override suspend fun processMessage(message: FeatureMessage) {
+                        println("🔍 [ImprovedWeatherAgent] Trace: $message")
+                    }
+                    override suspend fun close() = Unit
+                })
+            }
+        }
+    } catch (e: Exception) {
+        println("❌ [ImprovedWeatherAgent] 连接失败: ${e.message}")
+
+        // 读取容器输出用于诊断
+        readContainerOutput(process)
+        throw e
+    }
+}
+
+private fun validateApiKey(apiKey: String): Boolean {
+    return try {
+        val url = java.net.URL("https://api.openweathermap.org/data/2.5/weather?q=London&appid=$apiKey&units=metric")
+        val connection = url.openConnection() as java.net.HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 5000
+        connection.readTimeout = 10000
+
+        val responseCode = connection.responseCode
+        println("🔍 [ImprovedWeatherAgent] API 密钥验证响应码: $responseCode")
+
+        responseCode == 200
+    } catch (e: Exception) {
+        println("⚠️ [ImprovedWeatherAgent] API 密钥验证失败: ${e.message}")
+        false
+    }
+}
+
+private fun startMcpContainer(apiKey: String): Process {
+    println("🐳 [ImprovedWeatherAgent] 启动 Docker 容器...")
+
+    return ProcessBuilder(
+        "docker", "run", "-i", "--rm",
+        "-e", "OWM_API_KEY=$apiKey",
+        "-e", "DEBUG=1", // 启用调试模式
+        "mcp/openweather"
+    ).apply {
+        redirectErrorStream(true)
+    }.start()
+}
+
+private fun readContainerOutput(process: Process) {
+    try {
+        val reader = BufferedReader(InputStreamReader(process.inputStream))
+        val lines = reader.readLines()
+
+        println("📋 [ImprovedWeatherAgent] Docker 容器输出:")
+        lines.forEach { line ->
+            println("   $line")
+        }
+    } catch (e: Exception) {
+        println("⚠️ [ImprovedWeatherAgent] 无法读取容器输出: ${e.message}")
+    }
+}
+
+// 测试函数
+fun main() = runBlocking {
+    try {
+        println("🧪 [ImprovedWeatherAgent] 开始测试改进的天气代理...")
+
+        val weatherAgent = createImprovedWeatherAgent()
+
+        println("🌤️ [ImprovedWeatherAgent] 天气代理创建成功")
+
+        // 测试天气查询
+        val testQueries = listOf(
+            "What's the current weather in London?",
+            "天气预报 New York",
+            "Temperature in Tokyo"
+        )
+
+        testQueries.forEach { query ->
+            println("\n📍 [ImprovedWeatherAgent] 测试查询: $query")
+            try {
+                val result = weatherAgent.run(query)
+                println("🌤️ [ImprovedWeatherAgent] 结果: $result")
+            } catch (e: Exception) {
+                println("❌ [ImprovedWeatherAgent] 查询失败: ${e.message}")
+            }
+        }
+
+    } catch (e: Exception) {
+        println("❌ [ImprovedWeatherAgent] 测试失败: ${e.message}")
+        e.printStackTrace()
+    }
+}

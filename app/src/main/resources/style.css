@@ -1,0 +1,186 @@
+/* General Body and App Container */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #f0f2f5;
+    color: #1c1e21;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+}
+
+/* Styles for the main application container, adapted from the old #app */
+#app-container {
+    width: 100%;
+    max-width: 800px;
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    padding: 24px;
+    box-sizing: border-box;
+}
+
+h1 {
+    color: #0d1a49;
+    border-bottom: 2px solid #e7e9ed;
+    padding-bottom: 8px;
+    margin-top: 0;
+}
+
+/* Configuration Panel Styles */
+#config-panel .input-group {
+    margin: 16px 0;
+}
+
+#config-panel label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+#config-panel input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ccd0d5;
+    border-radius: 6px;
+    box-sizing: border-box;
+}
+
+/* Button Styles */
+button#start-button {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+    background-color: #1877f2;
+    color: white;
+}
+
+button#start-button:hover {
+    background-color: #166fe5;
+}
+
+button#start-button:disabled {
+    background-color: #9dbbf2;
+    cursor: not-allowed;
+}
+
+/* Debate Container Styles */
+#debate-container {
+    margin-top: 20px;
+}
+
+/* Status Indicator Styles */
+#status-indicator {
+    background-color: #e7f3ff;
+    border-left: 4px solid #1877f2;
+    padding: 12px;
+    margin: 16px 0;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+/* Scrollable Output Container */
+#debate-output-container {
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 10px;
+    border: 1px solid #e7e9ed;
+    border-radius: 8px;
+    background: #f9f9f9;
+}
+
+/* === NEW: Round Separator Style === */
+.round-separator {
+    text-align: center;
+    font-weight: bold;
+    color: #606770;
+    margin: 24px 0;
+    border-top: 1px dashed #ccd0d5;
+    border-bottom: 1px dashed #ccd0d5;
+    padding: 8px 0;
+    font-size: 1.2em;
+    background-color: #f0f2f5;
+}
+
+/* === NEW: Individual Message Styles === */
+.message {
+    margin-bottom: 16px;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    position: relative;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.message.pro {
+    border-left: 4px solid #235dff;
+}
+
+.message.con {
+    border-left: 4px solid #e0284f;
+}
+
+.message-header {
+    font-weight: bold;
+    margin-bottom: 8px;
+    font-size: 1.1em;
+    display: flex;
+    align-items: center;
+}
+
+.pro .message-header { color: #235dff; }
+.con .message-header { color: #e0284f; }
+
+.model-badge {
+    font-size: 0.8em;
+    font-weight: 600; /* Bolder text for better readability */
+    padding: 2px 8px;
+    border-radius: 10px;
+    color: white;
+    margin-left: 8px;
+}
+
+/* === PERFECTED: Custom badge colors for models === */
+.model-badge.gemini {
+    background-color: #e7f3ff; /* Light Blue */
+    color: #1877f2;           /* Blue Text */
+}
+
+.model-badge.gpt {
+    background-color: #fffbe2; /* Light Yellow */
+    color: #a77700;           /* Dark Yellow/Gold Text */
+}
+
+.model-badge.总结 {
+    background-color: #f5a623;
+}
+
+.message-content {
+    line-height: 1.6;
+    color: #333;
+    padding-left: 4px;
+}
+
+/* === NEW: Final Verdict Style === */
+.verdict {
+    margin-top: 10px;
+    padding: 16px;
+    background-color: #fffbe2;
+    border: 2px solid #ffce00;
+    border-radius: 8px;
+}
+
+.verdict h3 {
+    border-bottom-color: #ffce00;
+    color: #a77700;
+    margin-top: 0;
+}
+
+.verdict h4 { color: #0d1a49; }

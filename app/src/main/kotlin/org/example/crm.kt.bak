@@ -1,0 +1,647 @@
+//package org.example
+
+import ai.koog.agents.core.tools.annotations.LLMDescription
+import ai.koog.agents.core.tools.annotations.Tool
+import ai.koog.agents.core.tools.reflect.ToolSet
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.agent.config.AIAgentConfig
+import ai.koog.agents.core.agent.entity.ToolSelectionStrategy
+import ai.koog.agents.core.dsl.builder.strategy
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.core.tools.reflect.asTools
+import ai.koog.agents.ext.agent.ProvideStringSubgraphResult
+import ai.koog.agents.ext.agent.StringSubgraphResult
+import ai.koog.agents.ext.agent.subgraphWithTask
+import ai.koog.agents.memory.config.MemoryScopeType
+import ai.koog.agents.memory.feature.AgentMemory
+import ai.koog.agents.memory.feature.nodes.nodeLoadFromMemory
+import ai.koog.agents.memory.feature.nodes.nodeSaveToMemory
+import ai.koog.agents.memory.model.Concept
+import ai.koog.agents.memory.model.FactType
+import ai.koog.agents.memory.model.MemorySubject
+import ai.koog.agents.memory.providers.AgentMemoryProvider
+import ai.koog.agents.memory.providers.LocalFileMemoryProvider
+import ai.koog.agents.memory.providers.LocalMemoryConfig
+import ai.koog.agents.memory.storage.Aes256GCMEncryptor
+import ai.koog.agents.memory.storage.EncryptedStorage
+import ai.koog.prompt.dsl.prompt
+import ai.koog.prompt.executor.clients.anthropic.AnthropicModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+import ai.koog.prompt.executor.model.PromptExecutor
+import ai.koog.prompt.markdown.markdown
+import ai.koog.rag.base.files.JVMFileSystemProvider
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
+import kotlin.io.path.Path
+
+private object MemorySubjects {
+    /**
+     * Information specific to the user
+     * Examples: Conversation preferences, issue history, contact information
+     */
+    @Serializable
+    data object User : MemorySubject() {
+        override val name: String = "user"
+        override val promptDescription: String =
+            "User information (conversation preferences, issue history, contact details, etc.)"
+        override val priorityLevel: Int = 1
+    }
+
+    /**
+     * Information specific to the machine or device
+     * Examples: Device type, error codes, diagnostic results
+     */
+    @Serializable
+    data object Machine : MemorySubject() {
+        override val name: String = "machine"
+        override val promptDescription: String =
+            "Machine or device information (device type, error codes, diagnostic results, etc.)"
+        override val priorityLevel: Int = 2
+    }
+
+    /**
+     * Information specific to the organization
+     * Examples: Corporate customer details, product information, solutions
+     */
+    @Serializable
+    data object Organization : MemorySubject() {
+        override val name: String = "organization"
+        override val promptDescription: String =
+            "Organization information (corporate customer details, product information, solutions, etc.)"
+        override val priorityLevel: Int = 3
+    }
+}
+
+/**
+ * Creates and configures a customer support agent that demonstrates memory system usage.
+ * This agent tracks and utilizes:
+ * 1. User conversation preferences and issue history
+ * 2. Machine/device diagnostic information
+ * 3. Organization-specific product information and solutions
+ *
+ * The agent uses encrypted local storage to securely persist information
+ * and demonstrates proper memory organization using subjects and scopes.
+ */
+fun createCustomerSupportAgent(
+    userInfoToolSet: ToolSet,
+    diagnosticToolSet: ToolSet,
+    knowledgeBaseToolSet: ToolSet,
+    memoryProvider: AgentMemoryProvider,
+    promptExecutor: PromptExecutor,
+    maxAgentIterations: Int = 50,
+    featureName: String? = null,
+    productName: String? = null,
+    organizationName: String? = null,
+): AIAgent<String, String> {
+    // Memory concepts
+    val userPreferencesConcept = Concept(
+        keyword = "user-preferences",
+        description = """
+            Information about the user's conversation preferences including:
+            - Preferred lexicon and terminology
+            - Preference for long or short responses
+            - Communication style (formal, casual, technical)
+            - Preferred contact methods
+            This information helps in personalizing the support experience.
+        """.trimIndent(),
+        factType = FactType.MULTIPLE
+    )
+
+    val userIssuesConcept = Concept(
+        keyword = "user-issues",
+        description = """
+            Information about the user's resolved and open issues including:
+            - Issue descriptions and identifiers
+            - Resolution status and details
+            - Timestamps and duration
+            - Related products or services
+            This information helps in tracking the user's history with support.
+        """.trimIndent(),
+        factType = FactType.MULTIPLE
+    )
+
+    val diagnosticResultsConcept = Concept(
+        keyword = "diagnostic-results",
+        description = """
+            Information about diagnostic results for specific devices or error codes including:
+            - Device identifiers and types
+            - Error codes and descriptions
+            - Diagnostic steps performed
+            - Results and recommendations
+            This information helps avoid repeating diagnostic steps for known issues.
+        """.trimIndent(),
+        factType = FactType.MULTIPLE
+    )
+
+    val organizationSolutionsConcept = Concept(
+        keyword = "organization-solutions",
+        description = """
+            Information about solutions provided to corporate customers including:
+            - Product or service involved
+            - Issue description
+            - Solution details
+            - Customer organization
+            This information helps in sharing knowledge across an organization.
+        """.trimIndent(),
+        factType = FactType.MULTIPLE
+    )
+
+    // Agent configuration
+    val agentConfig = AIAgentConfig(
+        prompt = prompt("customer-support") {},
+        model = AnthropicModels.Sonnet_3_7,
+        maxAgentIterations = maxAgentIterations
+    )
+
+    // Create agent strategy
+    val strategy = strategy<String, String>("customer-support", toolSelectionStrategy = ToolSelectionStrategy.NONE) {
+        val loadMemory by subgraph<String, String>(tools = emptyList()) {
+            val nodeLoadUserPreferences by nodeLoadFromMemory<String>(
+                concept = userPreferencesConcept,
+                subject = MemorySubjects.User,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            val nodeLoadUserIssues by nodeLoadFromMemory<String>(
+                concept = userIssuesConcept,
+                subject = MemorySubjects.User,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            val nodeLoadDiagnosticResults by nodeLoadFromMemory<String>(
+                concept = diagnosticResultsConcept,
+                subject = MemorySubjects.Machine,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            val nodeLoadOrganizationSolutions by nodeLoadFromMemory<String>(
+                concept = organizationSolutionsConcept,
+                subject = MemorySubjects.Organization,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            nodeStart then nodeLoadUserPreferences then nodeLoadUserIssues then nodeLoadDiagnosticResults then nodeLoadOrganizationSolutions then nodeFinish
+        }
+
+        val supportSession by subgraphWithTask<String>(
+            tools = userInfoToolSet.asTools() + diagnosticToolSet.asTools() + knowledgeBaseToolSet.asTools()
+        ) { userInput ->
+            markdown {
+                h2("You are a customer support agent that helps users resolve issues and tracks information for future reference")
+                text("You should:")
+                br()
+                bulleted {
+                    item {
+                        text(
+                            "Understand the user's preferences and communication style. " +
+                                    "Do not ask this explicitly, but use this information (if available) from your own knowledge or memory"
+                        )
+                    }
+                    item { text("Review the user's issue history to provide context") }
+                    item { text("Use diagnostic information to avoid repeating steps") }
+                    item { text("Leverage organization-wide solutions when applicable") }
+                    item { text("Solve the user's issue and provide a solution if possible") }
+                }
+
+                h2("User's question:")
+                text(userInput)
+            }
+        }
+        val retrieveResult by node<StringSubgraphResult, String> { it.result }
+
+        val saveToMemory by subgraph<String, String>(tools = emptyList()) {
+            val saveUserPreferences by nodeSaveToMemory<String>(
+                concept = userPreferencesConcept,
+                subject = MemorySubjects.User,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            val saveUserIssues by nodeSaveToMemory<String>(
+                concept = userIssuesConcept,
+                subject = MemorySubjects.User,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            val saveDiagnosticResults by nodeSaveToMemory<String>(
+                concept = diagnosticResultsConcept,
+                subject = MemorySubjects.Machine,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            val saveOrganizationSolutions by nodeSaveToMemory<String>(
+                concept = organizationSolutionsConcept,
+                subject = MemorySubjects.Organization,
+                scope = MemoryScopeType.PRODUCT
+            )
+
+            nodeStart then saveUserPreferences then saveUserIssues then saveDiagnosticResults then saveOrganizationSolutions then nodeFinish
+        }
+
+        nodeStart then loadMemory then supportSession then retrieveResult then saveToMemory then nodeFinish
+    }
+
+    // Create and configure the agent runner
+    return AIAgent(
+        promptExecutor = promptExecutor,
+        strategy = strategy,
+        agentConfig = agentConfig,
+        toolRegistry = ToolRegistry {
+            tools(userInfoToolSet.asTools())
+            tools(diagnosticToolSet.asTools())
+            tools(knowledgeBaseToolSet.asTools())
+
+            tool(ProvideStringSubgraphResult)
+        }
+    ) {
+        install(AgentMemory) {
+            this.memoryProvider = memoryProvider
+
+            if (featureName != null) this.featureName = featureName
+            if (productName != null) this.productName = productName
+            if (organizationName != null) this.organizationName = organizationName
+        }
+    }
+}
+
+/**
+ * Main entry point for running the customer support agent.
+ */
+fun main(): kotlin.Unit = runBlocking {
+    // Example key, generated by AI :)
+    val secretKey = "7UL8fsTqQDq9siUZgYO3bLGqwMGXQL4vKMWMscKB7Cw="
+
+    // Create memory provider
+    val memoryProvider = LocalFileMemoryProvider(
+        config = LocalMemoryConfig("customer-support-memory"),
+        storage = EncryptedStorage(
+            fs = JVMFileSystemProvider.ReadWrite,
+            encryption = Aes256GCMEncryptor(secretKey)
+        ),
+        fs = JVMFileSystemProvider.ReadWrite,
+        root = Path("./customer-support-memory/"),
+    )
+
+    // Create and run the agent
+    val agent = createCustomerSupportAgent(
+        userInfoToolSet = UserInfoToolSet(),
+        diagnosticToolSet = DiagnosticToolSet(),
+        knowledgeBaseToolSet = KnowledgeBaseToolSet(),
+        memoryProvider = memoryProvider,
+        featureName = "customer-support",
+        productName = "support-system",
+        organizationName = "grazie",
+        promptExecutor = simpleOpenAIExecutor(ApiKeyService.openAIApiKey)
+    )
+    agent.run("")
+}
+/**
+ * User information tools for customer support.
+ * Provides capabilities for:
+ * - Retrieving user preferences and communication style
+ * - Accessing user issue history
+ * - Managing user contact information
+ */
+@LLMDescription("Tools for retrieving and managing user information for customer support")
+class UserInfoToolSet : ToolSet {
+
+    @Tool
+    @LLMDescription("Get user communication preferences")
+    fun getUserPreferences(
+        @LLMDescription("The ID of the user")
+        userId: String
+    ): String {
+        // In a real implementation, this would retrieve data from a database
+        return """
+            User Preferences for $userId:
+            - Preferred communication style: Technical
+            - Response length preference: Detailed
+            - Preferred contact method: Email
+            - Technical expertise level: Advanced
+        """.trimIndent()
+    }
+
+    @Tool
+    @LLMDescription("Get user's past issues")
+    fun getUserIssueHistory(
+        @LLMDescription("The ID of the user")
+        userId: String
+    ): String {
+        // In a real implementation, this would retrieve data from a database
+        return """
+            Issue History for $userId:
+            1. Issue #12345 - "Login problem" - Resolved on 2023-05-15
+               Solution: Reset password and updated security settings
+            2. Issue #12789 - "Configuration error" - Resolved on 2023-07-22
+               Solution: Updated configuration file and restarted service
+            3. Issue #13256 - "Performance degradation" - Open since 2023-09-10
+               Status: Under investigation by technical team
+        """.trimIndent()
+    }
+
+    @Tool
+    @LLMDescription("Get user's contact information")
+    fun getUserContactInfo(
+        @LLMDescription("The ID of the user")
+        userId: String
+    ): String {
+        // In a real implementation, this would retrieve data from a database
+        return """
+            Contact Information for $userId:
+            - Email: user@example.com
+            - Phone: +1-555-123-4567
+            - Organization: Acme Corp
+            - Department: IT Support
+        """.trimIndent()
+    }
+
+    @Tool
+    @LLMDescription("Update user's communication preferences")
+    fun updateUserPreferences(
+        @LLMDescription("The ID of the user")
+        userId: String,
+
+        @LLMDescription("New preferences information")
+        preferences: String
+    ): String {
+        // In a real implementation, this would update a database
+        return "Successfully updated preferences for user $userId: $preferences"
+    }
+}
+
+/**
+ * Knowledge base tools for customer support.
+ * Provides capabilities for:
+ * - Searching for solutions in the knowledge base
+ * - Retrieving product information
+ * - Accessing organization-specific solutions
+ * - Storing new solutions
+ */
+@LLMDescription("Tools for accessing and managing the knowledge base for customer support")
+class KnowledgeBaseToolSet : ToolSet {
+
+    @Tool
+    @LLMDescription("Search for solutions by keywords")
+    fun searchSolutions(
+        @LLMDescription("Search query or keywords")
+        query: String
+    ): String {
+        // In a real implementation, this would search a knowledge base
+        val keywords = query.lowercase().split(" ")
+        val results = mutableListOf<String>()
+
+        if (keywords.any { it in listOf("network", "connection", "wifi", "internet") }) {
+            results.add("Solution #1001: Troubleshooting Network Connectivity Issues")
+        }
+
+        if (keywords.any { it in listOf("login", "password", "authentication", "access") }) {
+            results.add("Solution #1002: Resolving Login and Authentication Problems")
+        }
+
+        if (keywords.any { it in listOf("slow", "performance", "speed", "lag") }) {
+            results.add("Solution #1003: Improving System Performance")
+        }
+
+        if (keywords.any { it in listOf("error", "crash", "freeze", "unresponsive") }) {
+            results.add("Solution #1004: Handling Application Crashes and Freezes")
+        }
+
+        return if (results.isNotEmpty()) {
+            "Search Results for '$query':\n" + results.joinToString("\n")
+        } else {
+            "No solutions found for query: $query"
+        }
+    }
+
+    @Tool
+    @LLMDescription("Get information about a product")
+    fun getProductInfo(
+        @LLMDescription("The ID of the product")
+        productId: String
+    ): String {
+        // In a real implementation, this would retrieve product data from a database
+        return when (productId) {
+            "P1001" -> """
+                Product Information for P1001 (Enterprise CRM):
+                - Version: 4.2.1
+                - Release Date: 2023-06-15
+                - Support Status: Active
+                - Key Features: Contact Management, Sales Pipeline, Reporting Dashboard
+                - Known Issues: Occasional slow performance with large datasets
+            """.trimIndent()
+            "P1002" -> """
+                Product Information for P1002 (Cloud Storage Solution):
+                - Version: 2.8.5
+                - Release Date: 2023-08-22
+                - Support Status: Active
+                - Key Features: File Sync, Sharing, Encryption, Mobile Access
+                - Known Issues: Upload issues with files larger than 2GB
+            """.trimIndent()
+            "P1003" -> """
+                Product Information for P1003 (Security Suite):
+                - Version: 5.1.0
+                - Release Date: 2023-07-10
+                - Support Status: Active
+                - Key Features: Firewall, Antivirus, Intrusion Detection, VPN
+                - Known Issues: Occasional false positives with certain file types
+            """.trimIndent()
+            else -> "No product information found for product ID: $productId"
+        }
+    }
+
+    @Tool
+    @LLMDescription("Get solutions specific to an organization")
+    fun getOrganizationSolutions(
+        @LLMDescription("The ID of the organization")
+        organizationId: String,
+
+        @LLMDescription("The ID of the product (optional)")
+        productId: String = ""
+    ): String {
+        // In a real implementation, this would retrieve organization-specific solutions
+        val productFilter = if (productId.isNotEmpty()) {
+            " for product $productId"
+        } else {
+            ""
+        }
+
+        return when (organizationId) {
+            "O1001" -> """
+                Organization-specific Solutions for O1001 (Acme Corp)$productFilter:
+                1. Custom authentication integration with Acme Corp's SSO system
+                2. Specialized reporting dashboard for Acme Corp's sales team
+                3. Custom data migration process for legacy Acme Corp systems
+            """.trimIndent()
+            "O1002" -> """
+                Organization-specific Solutions for O1002 (TechGlobal)$productFilter:
+                1. High-volume data processing configuration for TechGlobal's needs
+                2. Custom API integration with TechGlobal's internal systems
+                3. Enhanced security protocols specific to TechGlobal's requirements
+            """.trimIndent()
+            "O1003" -> """
+                Organization-specific Solutions for O1003 (HealthCare Inc)$productFilter:
+                1. HIPAA-compliant data handling procedures
+                2. Custom patient record integration
+                3. Specialized audit logging for healthcare compliance
+            """.trimIndent()
+            else -> "No organization-specific solutions found for organization ID: $organizationId$productFilter"
+        }
+    }
+
+    @Tool
+    @LLMDescription("Store a new solution in the knowledge base")
+    fun storeSolution(
+        @LLMDescription("The ID of the product (optional)")
+        productId: String = "",
+
+        @LLMDescription("The ID of the organization (optional)")
+        organizationId: String = "",
+
+        @LLMDescription("Data for the solution to store")
+        solutionData: String
+    ): String {
+        // In a real implementation, this would store the solution in a database
+        val targetInfo = if (organizationId.isNotEmpty()) {
+            "organization $organizationId"
+        } else if (productId.isNotEmpty()) {
+            "product $productId"
+        } else {
+            "general knowledge base"
+        }
+
+        return "Successfully stored solution in the $targetInfo:\n$solutionData"
+    }
+}
+
+/**
+ * Diagnostic tools for customer support.
+ * Provides capabilities for:
+ * - Running diagnostics on devices
+ * - Analyzing error codes
+ * - Retrieving diagnostic history
+ * - Providing troubleshooting steps
+ */
+@LLMDescription("Tools for performing diagnostics and troubleshooting for customer support")
+class DiagnosticToolSet : ToolSet {
+
+    @Tool
+    @LLMDescription("Run diagnostic on a device")
+    fun runDiagnostic(
+        @LLMDescription("The ID of the device")
+        deviceId: String,
+
+        @LLMDescription("Additional information for the diagnostic")
+        additionalInfo: String = ""
+    ): String {
+        // In a real implementation, this would run actual diagnostics
+        return """
+            Diagnostic Results for Device $deviceId:
+            - Connection Status: OK
+            - Memory Usage: 65%
+            - CPU Load: Normal
+            - Storage Space: 45% used
+            - Network Latency: 35ms
+
+            No critical issues detected.
+            Additional checks based on info "$additionalInfo" completed successfully.
+        """.trimIndent()
+    }
+
+    @Tool
+    @LLMDescription("Analyze an error code")
+    fun analyzeError(
+        @LLMDescription("The error code to analyze")
+        errorCode: String
+    ): String {
+        // In a real implementation, this would look up error codes in a database
+        return when (errorCode) {
+            "E1001" -> "Error E1001: Network Connection Failure - Check network settings and router connection."
+            "E2002" -> "Error E2002: Authentication Failure - Verify credentials and try again."
+            "E3003" -> "Error E3003: Resource Unavailable - The requested resource is temporarily unavailable."
+            else -> "Unknown Error Code: $errorCode - No information available for this error code."
+        }
+    }
+
+    @Tool
+    @LLMDescription("Get diagnostic history for a device")
+    fun getDiagnosticHistory(
+        @LLMDescription("The ID of the device")
+        deviceId: String
+    ): String {
+        // In a real implementation, this would retrieve data from a database
+        return """
+            Diagnostic History for Device $deviceId:
+            1. 2023-09-15: Full system diagnostic - All systems normal
+            2. 2023-08-22: Network connectivity check - Intermittent connection detected, router reset recommended
+            3. 2023-07-10: Memory usage analysis - High memory usage detected, application restart recommended
+            4. 2023-06-05: Storage space check - Low storage warning, cleanup recommended
+        """.trimIndent()
+    }
+
+    @Tool
+    @LLMDescription("Get troubleshooting steps for an issue")
+    fun getTroubleshootingSteps(
+        @LLMDescription("The error code to get troubleshooting steps for")
+        errorCode: String,
+
+        @LLMDescription("The ID of the device (optional)")
+        deviceId: String = ""
+    ): String {
+        // In a real implementation, this would retrieve data from a knowledge base
+        val deviceSpecificInfo = if (deviceId.isNotEmpty()) {
+            "\nDevice-specific recommendations for $deviceId: Ensure latest firmware is installed."
+        } else {
+            ""
+        }
+
+        return when (errorCode) {
+            "E1001" -> """
+                Troubleshooting Steps for Error E1001 (Network Connection Failure):
+                1. Check physical network connections
+                2. Restart your router and modem
+                3. Verify network settings are correct
+                4. Disable VPN or proxy if in use
+                5. Contact your ISP if problem persists$deviceSpecificInfo
+            """.trimIndent()
+
+            "E2002" -> """
+                Troubleshooting Steps for Error E2002 (Authentication Failure):
+                1. Verify username and password are correct
+                2. Check if caps lock is enabled
+                3. Reset password if necessary
+                4. Ensure account is not locked
+                5. Contact administrator if problem persists$deviceSpecificInfo
+            """.trimIndent()
+
+            "E3003" -> """
+                Troubleshooting Steps for Error E3003 (Resource Unavailable):
+                1. Wait a few minutes and try again
+                2. Check system status page for outages
+                3. Clear browser cache and cookies
+                4. Try accessing from a different network
+                5. Contact support if problem persists$deviceSpecificInfo
+            """.trimIndent()
+
+            else -> "No troubleshooting steps available for error code: $errorCode$deviceSpecificInfo"
+        }
+    }
+}
+
+internal object ApiKeyService {
+    val openAIApiKey: String
+        get() = System.getenv("OPENAI_API_KEY") ?: throw IllegalArgumentException("OPENAI_API_KEY env is not set")
+
+    val anthropicApiKey: String
+        get() = System.getenv("ANTHROPIC_API_KEY") ?: throw IllegalArgumentException("ANTHROPIC_API_KEY env is not set")
+
+    val googleApiKey: String
+        get() = System.getenv("GOOGLE_API_KEY") ?: throw IllegalArgumentException("GOOGLE_API_KEY env is not set")
+
+    val openRouterApiKey: String
+        get() = System.getenv("OPENROUTER_API_KEY") ?: throw IllegalArgumentException("OPENROUTER_API_KEY env is not set")
+
+    val awsAccessKey: String
+        get() = System.getenv("AWS_ACCESS_KEY_ID") ?: throw IllegalArgumentException("AWS_ACCESS_KEY_ID env is not set")
+
+    val awsSecretAccessKey: String
+        get() = System.getenv("AWS_SECRET_ACCESS_KEY") ?: throw IllegalArgumentException("AWS_SECRET_ACCESS_KEY env is not set")
+}

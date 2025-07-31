@@ -1,0 +1,256 @@
+package org.example
+
+import ai.koog.agents.core.tools.annotations.LLMDescription
+import ai.koog.agents.core.tools.annotations.Tool
+import ai.koog.agents.core.tools.reflect.ToolSet
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.agent.config.AIAgentConfig
+import ai.koog.agents.core.agent.entity.ToolSelectionStrategy
+import ai.koog.agents.core.dsl.builder.strategy
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.core.tools.reflect.asTools
+import ai.koog.agents.ext.agent.ProvideStringSubgraphResult
+import ai.koog.agents.ext.agent.StringSubgraphResult
+import ai.koog.agents.ext.agent.subgraphWithTask
+import ai.koog.agents.ext.tool.SayToUser
+import ai.koog.agents.memory.config.MemoryScopeType
+import ai.koog.agents.memory.feature.AgentMemory
+import ai.koog.agents.memory.feature.nodes.nodeLoadFromMemory
+import ai.koog.agents.memory.feature.nodes.nodeSaveToMemory
+import ai.koog.agents.memory.model.Concept
+import ai.koog.agents.memory.model.FactType
+import ai.koog.agents.memory.model.MemorySubject
+import ai.koog.agents.memory.providers.AgentMemoryProvider
+import ai.koog.agents.memory.providers.LocalFileMemoryProvider
+import ai.koog.agents.memory.providers.LocalMemoryConfig
+import ai.koog.agents.memory.storage.Aes256GCMEncryptor
+import ai.koog.agents.memory.storage.EncryptedStorage
+import ai.koog.prompt.dsl.prompt
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.clients.google.GoogleModels
+import ai.koog.prompt.executor.clients.openai.OpenAILLMClient
+import ai.koog.prompt.executor.clients.google.GoogleLLMClient
+import ai.koog.prompt.executor.clients.openrouter.OpenRouterLLMClient
+import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
+import ai.koog.prompt.llm.LLMProvider
+import ai.koog.rag.base.files.JVMFileSystemProvider
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
+import kotlin.io.path.Path
+import ai.koog.prompt.executor.clients.openrouter.OpenRouterModels
+import kotlinx.serialization.json.Json
+import kotlin.io.path.Path
+
+// --- 1. 状态管理：增强以包含历史记录，使用JSON进行序列化 ---
+@Serializable
+data class DebateState(
+    val topic: String,
+    val totalRounds: Int,
+    val currentRound: Int = 1,
+    val history: List<String> = emptyList(),
+    val isFinished: Boolean = false
+) {
+    fun shouldContinue(): Boolean = !isFinished && currentRound <= totalRounds
+}
+
+// --- 2. 记忆主题定义：保持原样 ---
+private object MemorySubjects {
+    @Serializable
+    data object Debater : MemorySubject() {
+        override val name: String = "debater"
+        override val promptDescription: String = "辩论者信息和配置"
+        override val priorityLevel: Int = 1
+    }
+
+    @Serializable
+    data object Script : MemorySubject() {
+        override val name: String = "script"
+        override val promptDescription: String = "辩论发言记录"
+        override val priorityLevel: Int = 3
+    }
+}
+
+// --- 3. 独立的辩手/裁判 Agent 工厂 ---
+/**
+ * 创建一个辩论者或裁判 Agent。这是一个无工具的、纯粹的文本生成 Agent。
+ */
+fun createSinglePurposeAgent(
+    executor: PromptExecutor,
+    model: LLMModel,
+    systemPrompt: String
+): AIAgent<String, String> {
+    return AIAgent(
+        executor = executor,
+        model = model,
+        prompt = prompt { system(systemPrompt) },
+        maxAgentIterations = 1 //
+    )
+}
+
+// --- 4. 强大的工具集：封装了 Agent 调用和记忆写入 ---
+class DebateExecutionToolSet(
+    private val executor: PromptExecutor,
+    private val memoryProvider: AgentMemoryProvider
+) : ToolSet {
+
+    // 内部持有的、独立的辩手和裁判 Agent
+    private val proDebater = createSinglePurposeAgent(
+        executor,
+        GoogleModels.Gemini2_0Flash,
+        "你是正方辩手。你的任务是根据辩论历史，为你的立场提供强有力的论据或反驳。要表现出侵略性和说服力。"
+    )
+    private val conDebater = createSinglePurposeAgent(
+        executor,
+        OpenAIModels.Chat.GPT4o,
+        "你是反方辩手。你的任务是根据辩论历史，冷静地、有条理地反驳对方的观点并巩固你自己的立场。要注重逻辑和证据。"
+    )
+    private val judge = createSinglePurposeAgent(
+        executor,
+        OpenAIModels.Chat.GPT4o,
+        "你是一位经验丰富的辩论赛评委。你的裁决必须公正、全面、有理有据，并明确指出获胜方及其理由。"
+    )
+
+    @Tool
+    @LLMDescription("运行一个辩论回合。该工具会调用指定的辩手，获取其发言，然后将发言内容记录到记忆中。")
+    fun runDebateTurnAndRecord(
+        @LLMDescription("要发言的一方，必须是 '正方' 或 '反方'") side: String,
+        @LLMDescription("当前辩论的主题") topic: String,
+        @LLMDescription("到目前为止的辩论历史，用于提供上下文") history: List<String>,
+        @LLMDescription("当前是第几轮辩论") round: Int
+    ): String { // 返回生成的发言
+        println("🛠️  工具: 正在为 $side (第 $round 轮) 生成发言...")
+        val debater = if (side == "正方") proDebater else conDebater
+        val context = """
+            辩论主题: "$topic"
+            当前是第 $round 轮。
+            这是到目前为止的辩论历史:
+            ---
+            ${history.joinToString("\n")}
+            ---
+            现在轮到你 ($side) 发言。请陈述你的观点。
+        """.trimIndent()
+
+        val speech = runBlocking<String> { debater.run(context) }
+
+        // 将结果写入记忆
+        runBlocking {
+            val scriptMemory = AgentMemory(memoryProvider, MemoryScopesProfile(session = "debate-session"))
+            scriptMemory.addFact(MemorySubjects.Script, "第 $round 轮, $side: $speech")
+        }
+        println("🧠  记忆: 已记录 $side 第 $round 轮的发言。")
+        return speech
+    }
+
+    @Tool
+    @LLMDescription("在所有辩论回合结束后，根据完整的辩论历史做出最终裁决。")
+    fun judgeDebateWinner(
+        @LLMDescription("辩论主题") topic: String,
+        @LLMDescription("完整的辩论历史记录") fullHistory: List<String>
+    ): String {
+        println("🏆  工具: 正在调用评委进行最终裁决...")
+        val context = """
+            辩论主题: "$topic"
+            完整的辩论记录如下:
+            ---
+            ${fullHistory.joinToString("\n\n")}
+            ---
+            请根据以上所有内容，宣布获胜方并详细解释你的评判理由。
+        """.trimIndent()
+        return runBlocking<String> { judge.run(context) }
+    }
+}
+
+
+// --- 5. 主持人 Agent：驱动整个流程 ---
+fun createDebateHostAgent(
+    executor: PromptExecutor,
+    memoryProvider: AgentMemoryProvider
+): AIAgent<String, String> {
+    val toolSet = DebateExecutionToolSet(executor, memoryProvider)
+
+    val hostSystemPrompt = """
+    你是一位经验丰富的辩论主持人。你的工作是根据输入的 JSON 格式的 `DebateState` 来推进辩论。
+
+    你的决策流程:
+    1.  **分析状态**: 查看 `currentRound` 和 `history`，确定现在轮到谁发言。正方总是先发言。如果 `history` 的条目是偶数，则轮到正方；如果是奇数，则轮到反方。
+    2.  **调用工具**:
+        - 如果辩论未结束 (`shouldContinue` 为 true)，你必须调用 `runDebateTurnAndRecord` 工具来获取当前辩手的发言。
+        - 如果辩论已结束 (`isFinished` 为 true)，你必须调用 `judgeDebateWinner` 工具来获得最终裁决。
+    3.  **返回结果**: 你的最终输出必须是你调用的工具返回的 **原始、未经修改的文本** (即辩手的发言或评委的裁决)。不要添加任何额外的词语，如 "好的，这是发言："。
+    """.trimIndent()
+
+    return AIAgent(
+        executor = executor,
+        model = OpenAIModels.Chat.GPT4o,
+        prompt = prompt { system(hostSystemPrompt) },
+        toolSelectionStrategy = ToolSelectionStrategy.AUTO,
+        maxAgentIterations = 4,
+        toolRegistry = ToolRegistry {
+            register(*toolSet.asTools().toTypedArray())
+        }
+    )
+}
+
+// --- 辅助函数：创建多模型执行器 ---
+fun createMultiModelExecutor(): PromptExecutor {
+    val openAIApiToken = System.getenv("OPENAI_API_KEY") ?: error("OPENAI_API_KEY environment variable not set")
+    val googleApiToken = System.getenv("GEMINI_API_KEY") ?: error("GEMINI_API_KEY environment variable not set")
+
+    val openAIClient = OpenAILLMClient(openAIApiToken)
+    val googleClient = GoogleLLMClient(googleApiToken)
+
+    return MultiLLMPromptExecutor(
+        LLMProvider.OpenAI to openAIClient,
+        LLMProvider.Google to googleClient
+    )
+}
+
+
+// --- 6. 主循环：实现动态多轮逻辑 ---
+fun main() = runBlocking {
+    // 初始化 Executor 和 Memory
+    val executor = createMultiModelExecutor()
+    val memoryProvider = LocalFileMemoryProvider(
+        LocalMemoryConfig(root = Path("./debate-memory"), storage = NoOpStorage()),
+        JVMFileSystemProvider()
+    )
+
+    // 创建主持人 Agent
+    val hostAgent = createDebateHostAgent(executor, memoryProvider)
+
+    // 初始化状态
+    println("请输入辩论议题 (直接回车使用 '人工智能利大于弊'):")
+    val topic = readlnOrNull()?.takeIf { it.isNotBlank() } ?: "人工智能利大于弊"
+    println("请输入辩论总轮数 (例如: 2):")
+    val totalRounds = readlnOrNull()?.toIntOrNull() ?: 2
+
+    var state = DebateState(topic, totalRounds)
+    val json = Json { prettyPrint = true }
+
+    println("\n--- 辩论开始 ---")
+    println("主题: ${state.topic}, 共 $totalRounds 轮")
+
+    // 动态多轮循环
+    while (state.shouldContinue()) {
+        val sideToSpeak = if (state.history.size % 2 == 0) "正方" else "反方"
+        println("\n==================== 第 ${state.currentRound} 轮 - $sideToSpeak 发言 ====================")
+
+        // 主持人根据当前状态决定下一步行动
+        val stateJson = json.encodeToString(state)
+        val speech = hostAgent.run(stateJson)
+
+        println(speech)
+
+        // 更新状态
+        val newHistory = state.history + "$sideToSpeak: $speech"
+        val nextRound = if (sideToSpeak == "反方") state.currentRound + 1 else state.currentRound
+        state = state.copy(history = newHistory, currentRound = nextRound)
+    }
+
+    // 最终裁决
+    println("\n==================== 辩论结束 - 最终裁决 ====================")
+    val finalState = state.copy(isFinished = true)
+    val judgement = hostAgent.run(json.encodeToString(finalState))
+
+    println(judgement)
+}

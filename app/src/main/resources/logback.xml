@@ -1,0 +1,22 @@
+<configuration>
+    <!-- 定义控制台输出器 -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- 定义日志输出格式 -->
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 
+      设置第三方库的日志级别，以减少控制台的杂乱信息。
+      将 koog-agents 库的日志级别设置为 WARN，只有警告和错误信息才会被打印。
+    -->
+    <logger name="ai.koog" level="WARN"/>
+    <logger name="io.ktor" level="INFO"/>
+
+    <!-- 根日志记录器，默认级别为 INFO -->
+    <root level="INFO">
+        <appender-ref ref="STDOUT" />
+    </root>
+
+</configuration>
