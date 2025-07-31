@@ -87,9 +87,29 @@ fun createDebateHostAgent(
 ): AIAgent<String, String> {
     var theRound = defaultRound
     // 获取API密钥
-    val openAIApiToken = System.getenv("OPENAI_API_KEY") ?: error("OPENAI_API_KEY environment variable not set")
-    val openRouterApiToken = System.getenv("OPENROUTER_API_KEY") ?: error("OPENROUTER_API_KEY environment variable not set")
-    val googleApiToken = System.getenv("GEMINI_API_KEY") ?: error("GEMINI_API_KEY environment variable not set")
+    val openAIApiToken = System.getenv("OPENAI_API_KEY")
+    if (openAIApiToken.isNullOrBlank()) {
+        println("CRITICAL: OPENAI_API_KEY environment variable not set or is empty.")
+        error("OPENAI_API_KEY environment variable not set")
+    } else {
+        println("DEBUG: Read OPENAI_API_KEY with length ${openAIApiToken.length}")
+    }
+
+    val openRouterApiToken = System.getenv("OPENROUTER_API_KEY")
+    if (openRouterApiToken.isNullOrBlank()) {
+        println("CRITICAL: OPENROUTER_API_KEY environment variable not set or is empty.")
+        error("OPENROUTER_API_KEY environment variable not set")
+    } else {
+        println("DEBUG: Read OPENROUTER_API_KEY with length ${openRouterApiToken.length}")
+    }
+
+    val googleApiToken = System.getenv("GEMINI_API_KEY")
+    if (googleApiToken.isNullOrBlank()) {
+        println("CRITICAL: GEMINI_API_KEY environment variable not set or is empty.")
+        error("GEMINI_API_KEY environment variable not set")
+    } else {
+        println("DEBUG: Read GEMINI_API_KEY with length ${googleApiToken.length}")
+    }
 
     // 创建各种LLM客户端
     val openAIClient = OpenAILLMClient(openAIApiToken)
@@ -165,7 +185,7 @@ fun createDebateHostAgent(
 
             你的任务:
             1. 支持这个观点并提出强有力的论据
-            2. 你的辩词必须在100字以内
+            2. 你的辩词必须在350字以内
             3. 必须调用 SayToUser 工具输出你的观点
 
             请立即开始你的辩论发言！
@@ -200,7 +220,7 @@ fun createDebateHostAgent(
 
             你的任务:
             1. 反对这个观点并提出有力的反驳
-            2. 你的辩词必须在100字以内
+            2. 你的辩词必须在350字以内
             3. 必须调用 SayToUser 工具输出你的观点
 
             请立即开始你的反驳发言！
@@ -240,7 +260,7 @@ fun createDebateHostAgent(
 
             基于反方的质疑，请进一步加强你的论证:
             1. 回应反方的具体质疑点
-            2. 你的辩词必须在100字以内
+            2. 你的辩词必须在350字以内
             3. 必须调用 SayToUser 工具输出观点
 
             请开始你的第二轮发言！
@@ -263,7 +283,7 @@ fun createDebateHostAgent(
 
             基于正方的第二轮论证，请进一步反驳:
             1. 回应正方在第二轮提出的新论点
-            2. 你的辩词必须在100字以内
+            2. 你的辩词必须在350字以内
             3. 必须调用 SayToUser 工具输出观点
 
             请开始你的第二轮反驳！
@@ -287,7 +307,7 @@ fun createDebateHostAgent(
 
             请进行总结陈词:
             1. 总结你的核心反对理由
-            2. 你的总结必须在50字以内
+            2. 你的总结必须在150字以内
             3. 必须调用 SayToUser 工具输出观点
             4. 可选使用 analyzeDebateOpinions 工具分析整场辩论
 
@@ -311,7 +331,7 @@ fun createDebateHostAgent(
 
             请进行总结陈词:
             1. 总结你的核心支持理由
-            2. 你的总结必须在50字以内
+            2. 你的总结必须在150字以内
             3. 必须调用 SayToUser 工具输出观点
             4. 可选使用 analyzeDebateOpinions 工具分析整场辩论
 
